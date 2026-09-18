@@ -210,6 +210,40 @@ function formatRpcError(error) {
   return error && error.message ? `jsonrpc error: ${error.message}` : `jsonrpc error: ${JSON.stringify(error)}`;
 }
 
+/**
+ * Render one text part for a tool result.
+ * @param text - string or JSON-serializable value.
+ * @returns the content-part array a dsh tool render must return.
+ */
+function ccTextPart(text) {
+  return [{ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text, null, 2) }];
+}
+
+/**
+ * `output.render` implementation required by dsh >= 0.1.5-rc.2
+ * (`dsh-tools` throws unless `output.render` is a function). Renders the
+ * bridge envelope { ok, result, error } as model-facing text.
+ * @param _args - the tool arguments (unused).
+ * @param value - the envelope returned by `execute`.
+ * @returns the content-part array for the tool result.
+ */
+function ccRenderOutput(_args, value) {
+  try {
+    if (value && value.ok === false) {
+      const err = value.error || {};
+      return ccTextPart(`[error] ${err.code || 'error'}: ${err.message || '(no message)'}`);
+    }
+    const payload = value && typeof value === 'object' && 'result' in value ? value.result : value;
+    // screen.capture returns a base64 data URL; never dump it into context.
+    if (typeof payload === 'string' && payload.startsWith('data:image/')) {
+      return ccTextPart(`[image ${payload.length} bytes — model-space canvas; coordinates refer to this canvas]`);
+    }
+    return ccTextPart(payload === undefined ? '(no result)' : JSON.stringify(payload, null, 2));
+  } catch (err) {
+    return ccTextPart(`[render error] ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 function makeLogger(ctx) {
   const log = (level, msg) => {
     if (ctx.logger && typeof ctx.logger[level] === 'function') ctx.logger[level](`[computer-control] ${msg}`);
@@ -243,7 +277,7 @@ export function apply(ctx, rowConfig = {}) {
       name: tool.name,
       description: tool.summary || `computer-control tool: ${tool.name}`,
       parameters: toolSchema(tool),
-      output: { schema: { type: 'object', additionalProperties: true } },
+      output: { schema: { type: 'object', additionalProperties: true }, render: ccRenderOutput },
       execute: (args) => run(tool.name, args),
     };
     const ret = ctx.tools && ctx.tools.register ? ctx.tools.register(def) : null;
@@ -265,7 +299,7 @@ export function apply(ctx, rowConfig = {}) {
           },
           required: ['request_id', 'approve'],
         },
-        output: { schema: { type: 'object', additionalProperties: true } },
+        output: { schema: { type: 'object', additionalProperties: true }, render: ccRenderOutput },
         execute: (args) => client.call('session.confirm', args ?? {}),
       }),
     );
